@@ -1,4 +1,8 @@
 //! Nonblocking synchronization structures
+//!
+//! This crate is designed for `no_std` applications where heap allocation is not possible. As
+//! such, there is no dependency on the standard library and all allocations are the responsibility
+//! of the caller.
 
 #![cfg_attr(not(test), no_std)]
 #![feature(const_fn)]
