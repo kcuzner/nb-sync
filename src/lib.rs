@@ -7,6 +7,7 @@
 #![cfg_attr(not(test), no_std)]
 #![feature(const_fn)]
 #![feature(optin_builtin_traits)]
+#![feature(never_type)]
 
 extern crate nb;
 extern crate bare_metal;
