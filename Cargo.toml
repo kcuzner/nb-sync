@@ -2,6 +2,9 @@
 name = "nb-sync"
 version = "0.1.0"
 authors = ["Kevin Cuzner <kevin@kevincuzner.com>"]
+description = "Non-blocking synchronization structures"
+repository = "https://github.com/kcuzner/nb-sync"
+license = "APSL-2.0 OR MIT"
 
 [dependencies]
 bare-metal = "0.1.2"
