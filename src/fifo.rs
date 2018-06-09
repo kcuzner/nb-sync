@@ -156,6 +156,40 @@ impl<'a, 'b: 'a, T: 'b> Channel<'b, T> {
 unsafe impl<'a, T: 'a> Sync for Channel<'a, T> {
 }
 
+/// State of a SendCompletion
+enum SendCompletionState<T> {
+    Sending(T),
+    Sent,
+}
+
+/// Sends a value along a channel.
+///
+/// This is created through `Channel::send` and allows for a send to be aborted, returning the
+/// owned value that was to be sent.
+pub struct SendCompletion<T> {
+    state: SendCompletionState<T>,
+}
+
+impl<T> SendCompletion<T> {
+    /// Constructs a new SendCompletion
+    fn new(value: T) -> Self {
+        SendCompletion { state: SendCompletionState::Sending(value) }
+    }
+
+    /// Attempts to send the value that this completion was created for.
+    pub fn poll(&mut self) -> nb::Result<(), !> {
+        unimplemented!()
+    }
+
+    /// Discards this completion, optionally returning the inner value if it wasn't sent.
+    pub fn done(self) -> Option<T> {
+        match self.state {
+            SendCompletionState::Sending(value) => Some(value),
+            _ => None,
+        }
+    }
+}
+
 /// Channel Receiver removing the need for a `NonReentrant`
 ///
 /// The Channel Receiver is not clonable. Since it uses a `&mut self` on the `recv` function, it
