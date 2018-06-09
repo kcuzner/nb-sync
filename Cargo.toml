@@ -1,8 +1,8 @@
 [package]
 name = "nb-sync"
-version = "0.1.0"
+version = "0.2.0"
 authors = ["Kevin Cuzner <kevin@kevincuzner.com>"]
-description = "Non-blocking synchronization structures"
+description = "Non-blocking synchronization structures for bare-metal environments"
 repository = "https://github.com/kcuzner/nb-sync"
 license = "APSL-2.0 OR MIT"
 
