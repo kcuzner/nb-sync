@@ -115,7 +115,7 @@ impl<'a, T: 'a> Channel<'a, T> {
     /// unsuccessful if the Channel is full.
     ///
     /// This requires a guarantee by the caller that this function will not be called reentrantly.
-    pub fn send(&self, value: T, _nr: &NonReentrant) -> nb::Result<(), !> {
+    pub fn send(&self, value: T, _nr: &NonReentrant) -> (nb::Result<(), !>, Option<T>) {
         // This is safe because if send is called, the fifo can only go from full to non-full.
         // Since we have a guarantee from the caller that this function won't be called
         // reentrantly, we can depend on recv_index not changing.
@@ -124,7 +124,7 @@ impl<'a, T: 'a> Channel<'a, T> {
         // effects.
         let full = unsafe { ((*self.send_index.get()) + 1) % (self.len()) == *self.recv_index.get() };
         if full {
-            Err(nb::Error::WouldBlock)
+            (Err(nb::Error::WouldBlock), Some(value))
         }
         else {
             let mut val: Option<T> = Some(value);
@@ -134,7 +134,7 @@ impl<'a, T: 'a> Channel<'a, T> {
                 swap(&mut val, &mut (*self.buffer.get())[index]);
                 *self.send_index.get() = (index + 1) % self.len();
             }
-            Ok(())
+            (Ok(()), None)
         }
     }
 }
@@ -154,40 +154,6 @@ impl<'a, 'b: 'a, T: 'b> Channel<'b, T> {
 }
 
 unsafe impl<'a, T: 'a> Sync for Channel<'a, T> {
-}
-
-/// State of a SendCompletion
-enum SendCompletionState<T> {
-    Sending(T),
-    Sent,
-}
-
-/// Sends a value along a channel.
-///
-/// This is created through `Channel::send` and allows for a send to be aborted, returning the
-/// owned value that was to be sent.
-pub struct SendCompletion<T> {
-    state: SendCompletionState<T>,
-}
-
-impl<T> SendCompletion<T> {
-    /// Constructs a new SendCompletion
-    fn new(value: T) -> Self {
-        SendCompletion { state: SendCompletionState::Sending(value) }
-    }
-
-    /// Attempts to send the value that this completion was created for.
-    pub fn poll(&mut self) -> nb::Result<(), !> {
-        unimplemented!()
-    }
-
-    /// Discards this completion, optionally returning the inner value if it wasn't sent.
-    pub fn done(self) -> Option<T> {
-        match self.state {
-            SendCompletionState::Sending(value) => Some(value),
-            _ => None,
-        }
-    }
 }
 
 /// Channel Receiver removing the need for a `NonReentrant`
@@ -254,12 +220,20 @@ impl<'a, 'b: 'a, T: 'b> Sender<'a, 'b, T> {
     /// unsuccessful if the Channel is full.
     ///
     /// This does not require a `NonReentrant` guarantee since the `&mut self` is guarantee enough.
-    pub fn send(&mut self, value: T) -> nb::Result<(), !> {
+    pub fn send(&mut self, value: T) -> (nb::Result<(), !>, Option<T>) {
         // Since the sender is not Clone, no CriticalSection is required. We guarantee due to &mut
         // self that this function can only be called once at a time, thus satisfying the
         // precondition for a NonReentrant.
         let nr = unsafe { CriticalSection::new() };
         self.inner.send(value, &nr)
+    }
+
+    /// Sends an item on the channel, returning a `SendCompletion`.
+    ///
+    /// The `SendCompletion` provides a more ergonomic `poll` method which is easily used with
+    /// `nb`'s `await!` macro. A standard `send` function is not directly compatible.
+    pub fn send_with_completion(self, value: T) -> SendCompletion<'a, 'b, T> {
+        SendCompletion::new(self, value)
     }
 }
 
@@ -269,10 +243,64 @@ unsafe impl<'a, 'b: 'a, T: 'b + Send> Send for Sender<'a, 'b, T> {
 impl<'a, 'b: 'a, T: 'b> !Sync for Sender<'a, 'b, T> {
 }
 
+
+/// Sends a value along a channel.
+///
+/// This is created through `Sender::send` and provides a `poll` function that can be used directly
+/// with the `nb` macro `await!`, while still allowing the owned `T` to be retrieved.
+pub struct SendCompletion<'a, 'b: 'a, T: 'b> {
+    sender: Sender<'a, 'b, T>,
+    value: Option<T>,
+}
+
+impl<'a, 'b: 'a, T: 'b> SendCompletion<'a, 'b, T> {
+    /// Constructs a new SendCompletion
+    fn new(sender: Sender<'a, 'b, T>, value: T) -> Self {
+        SendCompletion { sender: sender, value: Some(value), }
+    }
+
+    /// Attempts to send the value that this completion was created for.
+    pub fn poll(&mut self) -> nb::Result<(), !> {
+        match self.value {
+            Some(_) => {
+                // If we have a value to send, we will use this value here as a placeholder as we
+                // put it through the send function.
+                let mut value: Option<T> = None;
+                swap(&mut value, &mut self.value);
+                let nr = unsafe { CriticalSection::new() };
+                let (result, mut value) = self.sender.inner.send(value.unwrap(), &nr);
+                // When finished, we put the value back. If the value was sent, it will be None and
+                // subsequent calls to this function will return `Ok(())`.
+                swap(&mut value, &mut self.value);
+                result
+            },
+            None => Ok(()),
+        }
+    }
+
+    /// Discards this completion, optionally returning the inner value if it wasn't sent.
+    pub fn done(self) -> (Sender<'a, 'b, T>, Option<T>) {
+        match self.value {
+            Some(value) => (self.sender, Some(value)),
+            _ => (self.sender, None),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use nb;
+
+    struct NonClone {
+        _0: ()
+    }
+
+    impl NonClone {
+        fn new() -> Self {
+            NonClone { _0: () }
+        }
+    }
 
     #[test]
     fn basic() {
@@ -282,9 +310,60 @@ mod tests {
         assert_eq!(channel.len(), len);
         let (mut receiver, mut sender) = channel.split();
         assert_eq!(receiver.recv(), Err(nb::Error::WouldBlock));
-        assert_eq!(sender.send(4), Ok(()));
+        assert_eq!(sender.send(4), (Ok(()), None));
         assert_eq!(receiver.recv(), Ok(4));
         assert_eq!(receiver.recv(), Err(nb::Error::WouldBlock));
+    }
+
+    #[test]
+    fn completion() {
+        let mut arry: [Option<NonClone>; 5] = [None, None, None, None, None];
+        let len = arry.len();
+        let mut channel = Channel::new(&mut arry);
+        assert_eq!(channel.len(), len);
+        let (mut receiver, mut sender) = channel.split();
+        match receiver.recv() {
+            Err(nb::Error::WouldBlock) => {},
+            _ => assert!(false),
+        }
+        let mut completion = sender.send_with_completion(NonClone::new());
+        match receiver.recv() {
+            Err(nb::Error::WouldBlock) => {},
+            _ => assert!(false),
+        }
+        match completion.poll() {
+            Ok(_) => {},
+            _ => assert!(false),
+        }
+        match receiver.recv() {
+            Ok(_) => {},
+            _ => assert!(false),
+        }
+        match completion.poll() {
+            Ok(_) => {},
+            _ => assert!(false),
+        }
+        match receiver.recv() {
+            Err(nb::Error::WouldBlock) => {},
+            _ => assert!(false),
+        }
+        let (s, r) = completion.done();
+        sender = s;
+        match r {
+            None => {},
+            _ => assert!(false),
+        }
+        match receiver.recv() {
+            Err(nb::Error::WouldBlock) => {},
+            _ => assert!(false),
+        }
+        completion = sender.send_with_completion(NonClone::new());
+        let (s, r) = completion.done();
+        sender = s;
+        match r {
+            Some(_) => {},
+            _ => assert!(false),
+        }
     }
 
     #[test]
@@ -297,11 +376,11 @@ mod tests {
         for _rep in 0..10 {
             for i in 0..(len - 1) {
                 println!("Sending");
-                assert_eq!(sender.send(i as u8), Ok(()));
+                assert_eq!(sender.send(i as u8), (Ok(()), None));
             }
-            assert_eq!(sender.send(255), Err(nb::Error::WouldBlock));
+            assert_eq!(sender.send(255), (Err(nb::Error::WouldBlock), Some(255)));
             assert_eq!(receiver.recv(), Ok(0));
-            assert_eq!(sender.send(255), Ok(()));
+            assert_eq!(sender.send(255), (Ok(()), None));
             for i in 1..(len - 1) {
                 assert_eq!(receiver.recv(), Ok(i as u8));
             }
