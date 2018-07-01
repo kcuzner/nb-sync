@@ -1,8 +1,7 @@
 //! FIFO implemented using the `nb` non-blocking I/O API.
 //!
-//! As this is meant to be used in a `no_std` environment, there are no heap allocations. This
-//! requires extra lifetime parameters to explicitly keep references alive for the lifetime of
-//! channel senders and receivers.
+//! As this is meant to be used in a `no_std` environment, there are no heap allocations.
+//!
 
 use nb;
 use core::cell::UnsafeCell;
@@ -111,8 +110,8 @@ impl<'a, T: 'a> Channel<'a, T> {
 
     /// Sends a value to the channel
     ///
-    /// This returns a `()` if successful, otherwise it returns a `WouldBlock`. It is only
-    /// unsuccessful if the Channel is full.
+    /// This returns a `(Ok(()), None)` if successful, otherwise it returns a `WouldBlock` with the `Option` set
+    /// to the passed value. It is only unsuccessful if the Channel is full.
     ///
     /// This requires a guarantee by the caller that this function will not be called reentrantly.
     pub fn send(&self, value: T, _nr: &NonReentrant) -> (nb::Result<(), !>, Option<T>) {
@@ -143,8 +142,8 @@ impl<'a, 'b: 'a, T: 'b> Channel<'b, T> {
     /// Builds a sender and receiver for this channel
     ///
     /// The mutable borrow of self in this function will be for as long as the lifetimes of the
-    /// receiver and sender. This ensures that the Channel stays in one place in memory while the sender
-    /// and receiver are doing their thing.
+    /// receiver and sender. This ensures that the Channel stays in one place in memory and can't be
+    /// split again while the sender and receiver are doing their thing.
     ///
     /// The sender and receiver are not clonable. Due to this property they remove the requirement
     /// for the caller to provide a `NonReentrant` to the `send` and `recv` functions.
@@ -216,8 +215,9 @@ impl<'a, 'b: 'a, T: 'b> Sender<'a, 'b, T> {
 
     /// Sends an item on the channel.
     ///
-    /// This returns a `()` if successful, otherwise it returns a `WouldBlock`. It is only
-    /// unsuccessful if the Channel is full.
+    /// This returns a `(Ok(()), None)` if successful, otherwise it returns a `WouldBlock`. It is only
+    /// unsuccessful if the Channel is full. If it is unsuccessful, the function will return
+    /// `(Err(nb::Error::WouldBlock), Some(T))`. The `Option<T>` will contain the unsent value.
     ///
     /// This does not require a `NonReentrant` guarantee since the `&mut self` is guarantee enough.
     pub fn send(&mut self, value: T) -> (nb::Result<(), !>, Option<T>) {
@@ -246,7 +246,7 @@ impl<'a, 'b: 'a, T: 'b> !Sync for Sender<'a, 'b, T> {
 
 /// Sends a value along a channel.
 ///
-/// This is created through `Sender::send` and provides a `poll` function that can be used directly
+/// This is created through `Sender::send_with_completion` and provides a `poll` function that can be used directly
 /// with the `nb` macro `await!`, while still allowing the owned `T` to be retrieved.
 pub struct SendCompletion<'a, 'b: 'a, T: 'b> {
     sender: Sender<'a, 'b, T>,

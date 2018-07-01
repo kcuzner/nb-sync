@@ -3,12 +3,136 @@
 //! This crate is designed for `no_std` applications where heap allocation is not possible. As
 //! such, there is no dependency on the standard library and all allocations are the responsibility
 //! of the caller.
+//!
+//! # The Mutex
+//!
+//! The [`Mutex`] provided here can be used to provide exclusive access to a value. Because of this
+//! library's non-blocking nature, care must be exercised to avoid resource starvation. The lock
+//! method requires a [`bare_metal::CriticalSection`].
+//!
+//! # The Channel
+//!
+//! The [`fifo::Channel`] provides a single-producer single-consumer queue which is `Sync` and can
+//! be optionally split into a [`fifo::Sender`] and [`fifo::Receiver`] which are both `Send`. A key
+//! difference between using the `Channel` by itself vs the `Sender` and `Receiver` together is
+//! that the `Channel` requires a [`bare_metal::CriticalSection`] for several of its methods in
+//! order to provide safety. The `Sender` and `Receiver` can be used without this requirement.
+//!
+//! ## Channel Examples
+//!
+//! There are two ways a [`fifo::Channel`] can be used:
+//!
+//! ### Direct usage
+//!
+//! Direct usage requires passing an object that implements [`fifo::NonReentrant`].
+//!
+//!
+//! ```
+//! extern crate bare_metal;
+//! extern crate nb_sync;
+//!
+//! use nb_sync::fifo::Channel;
+//!
+//! //In an actual program this would be obtained safely
+//! let cs = unsafe { bare_metal::CriticalSection::new() };
+//!
+//! let mut buffer: [Option<u8>; 4] = [None; 4];
+//! let channel = Channel::new(&mut buffer);
+//!
+//! channel.send(10, &cs).0.unwrap();
+//! channel.recv(&cs).unwrap();
+//! ```
+//!
+//! ### Split into a sender and receiver
+//!
+//! This uses similar `send` and `recv` methods to the previous example, but does not require
+//! a [`bare_metal::CriticalSection`].
+//!
+//! #### Method 1: Basic "send" with a clonable
+//!
+//! For clonable types, the `fifo::Sender::send` method can be used inside an `await!` directly.
+//!
+//! ```
+//! extern crate nb;
+//! extern crate nb_sync;
+//!
+//! use nb_sync::fifo::Channel;
+//!
+//! let mut buffer: [Option<u8>; 4] = [None; 4];
+//! let mut channel = Channel::new(&mut buffer);
+//!
+//! let (mut receiver, mut sender) = channel.split();
+//!
+//! let clonable = 5;
+//! // this loop is "await!(sender.send(clonable).0).unwrap()"
+//! loop {
+//!     // Note that the value is transferred into send, so this is not very
+//!     // ergonomic except for clonable values.
+//!     match sender.send(clonable).0 {
+//!         Ok(()) => break Ok(()),
+//!         Err(nb::Error::WouldBlock) => {},
+//!         Err(nb::Error::Other(e)) => break Err(e),
+//!     }
+//! }.unwrap();
+//!
+//! // recv is also compatible with nb's await! macro
+//! receiver.recv().unwrap();
+//! ```
+//!
+//! #### Method 2: Sending with a completion
+//!
+//! Non-clonable types can be sent using the [`fifo::Sender::send_with_completion`] method.
+//!
+//! ```
+//! extern crate nb;
+//! extern crate nb_sync;
+//!
+//! use nb_sync::fifo::Channel;
+//!
+//! struct NonClone {
+//!     _0: (),
+//! }
+//! impl NonClone {
+//!     fn new() -> Self { NonClone { _0: () } }
+//! }
+//!
+//! let mut buffer: [Option<NonClone>; 4] = [None, None, None, None];
+//! let mut channel = Channel::new(&mut buffer);
+//!
+//! let (mut receiver, mut sender) = channel.split();
+//!
+//! let value = NonClone::new();
+//! let completion = sender.send_with_completion(value);
+//! // Completions can be aborted.
+//! let (s, v) = completion.done();
+//! sender = s;
+//! let value = v.unwrap(); //the original, unsent value is returned here
+//!
+//! let mut completion = sender.send_with_completion(value);
+//! // This loop is "await!(completion.poll()).unwrap()"
+//! loop {
+//!     match completion.poll() {
+//!         Ok(()) => break Ok(()),
+//!         Err(nb::Error::WouldBlock) => {},
+//!         Err(nb::Error::Other(e)) => break Err(e),
+//!     }
+//! }.unwrap();
+//!
+//! let (s, v) = completion.done();
+//! sender = s;
+//! assert!(v.is_none()); //the value has been sent.
+//!
+//! receiver.recv().unwrap();
+//! ```
+//!
+
 
 #![cfg_attr(not(test), no_std)]
 #![feature(const_fn)]
 #![feature(optin_builtin_traits)]
 #![feature(never_type)]
 
+#[macro_use]
 extern crate nb;
 extern crate bare_metal;
 
