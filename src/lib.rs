@@ -39,7 +39,7 @@
 //! let mut buffer: [Option<u8>; 4] = [None; 4];
 //! let channel = Channel::new(&mut buffer);
 //!
-//! channel.send(10, &cs).0.unwrap();
+//! channel.send(10, &cs).unwrap();
 //! channel.recv(&cs).unwrap();
 //! ```
 //!
@@ -64,11 +64,9 @@
 //! let (mut receiver, mut sender) = channel.split();
 //!
 //! let clonable = 5;
-//! // this loop is "await!(sender.send(clonable).0).unwrap()"
+//! // this loop is "await!(sender.send(clonable)).unwrap()"
 //! loop {
-//!     // Note that the value is transferred into send, so this is not very
-//!     // ergonomic except for clonable values.
-//!     match sender.send(clonable).0 {
+//!     match sender.send(clonable) {
 //!         Ok(()) => break Ok(()),
 //!         Err(nb::Error::WouldBlock) => {},
 //!         Err(nb::Error::Other(e)) => break Err(e),
@@ -81,7 +79,12 @@
 //!
 //! #### Method 2: Sending with a completion
 //!
-//! Non-clonable types can be sent using the [`fifo::Sender::send_with_completion`] method.
+//! Non-clonable types can be sent using the [`fifo::Sender::send_with_completion`] method. This is
+//! based on the [`fifo::Sender::send_lossless`] method. A [`fifo::SendCompletion`] is used to make
+//! this more directly usable with the `await!` macro. It takes ownership of the `Sender` and the
+//! passed value for the duration of the sending process. When [`fifo::SendCompletion::done`] is
+//! called the `Sender` will be returned along with an `Option` which contains the original value
+//! if it was not ultimately sent.
 //!
 //! ```
 //! extern crate nb;
@@ -132,7 +135,6 @@
 #![feature(optin_builtin_traits)]
 #![feature(never_type)]
 
-#[macro_use]
 extern crate nb;
 extern crate bare_metal;
 

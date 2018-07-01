@@ -110,11 +110,21 @@ impl<'a, T: 'a> Channel<'a, T> {
 
     /// Sends a value to the channel
     ///
+    /// This returns a `Ok(())` if successful, otherwise it returns a `WouldBlock`. It is only
+    /// unsuccessful if the Channel is full.
+    ///
+    /// This requires a guarantee by the caller that this function will not be called reentrantly.
+    pub fn send(&self, value: T, nr: &NonReentrant) -> nb::Result<(), !> {
+        self.send_lossless(value, nr).0
+    }
+
+    /// Sends a value to the channel, preserving the passed value if unsuccessful
+    ///
     /// This returns a `(Ok(()), None)` if successful, otherwise it returns a `WouldBlock` with the `Option` set
     /// to the passed value. It is only unsuccessful if the Channel is full.
     ///
     /// This requires a guarantee by the caller that this function will not be called reentrantly.
-    pub fn send(&self, value: T, _nr: &NonReentrant) -> (nb::Result<(), !>, Option<T>) {
+    pub fn send_lossless(&self, value: T, _nr: &NonReentrant) -> (nb::Result<(), !>, Option<T>) {
         // This is safe because if send is called, the fifo can only go from full to non-full.
         // Since we have a guarantee from the caller that this function won't be called
         // reentrantly, we can depend on recv_index not changing.
@@ -189,7 +199,7 @@ impl<'a, 'b: 'a, T: 'b> Receiver<'a, 'b, T> {
     }
 }
 
-unsafe impl<'a, 'b: 'a, T: 'b + Send> Send for Receiver<'a, 'b, T> {
+unsafe impl<'a, 'b: 'a, T: Send + 'b> Send for Receiver<'a, 'b, T> {
 }
 
 impl<'a, 'b: 'a, T: 'b> !Sync for Receiver<'a, 'b, T> {
@@ -215,29 +225,39 @@ impl<'a, 'b: 'a, T: 'b> Sender<'a, 'b, T> {
 
     /// Sends an item on the channel.
     ///
+    /// This returns a `Ok(())` if successful, otherwise it returns a `WouldBlock`. It is only
+    /// unsuccessful if the Channel is full.
+    ///
+    /// This does not require a `NonReentrant` guarantee since the `&mut self` is guarantee enough.
+    pub fn send(&mut self, value: T) -> nb::Result<(), !> {
+        self.send_lossless(value).0
+    }
+
+    /// Sends an item on the channel, preserving the passed value if unsuccessful
+    ///
     /// This returns a `(Ok(()), None)` if successful, otherwise it returns a `WouldBlock`. It is only
     /// unsuccessful if the Channel is full. If it is unsuccessful, the function will return
     /// `(Err(nb::Error::WouldBlock), Some(T))`. The `Option<T>` will contain the unsent value.
     ///
     /// This does not require a `NonReentrant` guarantee since the `&mut self` is guarantee enough.
-    pub fn send(&mut self, value: T) -> (nb::Result<(), !>, Option<T>) {
+    pub fn send_lossless(&mut self, value: T) -> (nb::Result<(), !>, Option<T>) {
         // Since the sender is not Clone, no CriticalSection is required. We guarantee due to &mut
         // self that this function can only be called once at a time, thus satisfying the
         // precondition for a NonReentrant.
         let nr = unsafe { CriticalSection::new() };
-        self.inner.send(value, &nr)
+        self.inner.send_lossless(value, &nr)
     }
 
-    /// Sends an item on the channel, returning a `SendCompletion`.
+    /// Sends an item on the channel, returning a [`SendCompletion`].
     ///
     /// The `SendCompletion` provides a more ergonomic `poll` method which is easily used with
-    /// `nb`'s `await!` macro. A standard `send` function is not directly compatible.
+    /// `nb`'s `await!` macro when using non-clonable types.
     pub fn send_with_completion(self, value: T) -> SendCompletion<'a, 'b, T> {
         SendCompletion::new(self, value)
     }
 }
 
-unsafe impl<'a, 'b: 'a, T: 'b + Send> Send for Sender<'a, 'b, T> {
+unsafe impl<'a, 'b: 'a, T: Send + 'b> Send for Sender<'a, 'b, T> {
 }
 
 impl<'a, 'b: 'a, T: 'b> !Sync for Sender<'a, 'b, T> {
@@ -268,7 +288,7 @@ impl<'a, 'b: 'a, T: 'b> SendCompletion<'a, 'b, T> {
                 let mut value: Option<T> = None;
                 swap(&mut value, &mut self.value);
                 let nr = unsafe { CriticalSection::new() };
-                let (result, mut value) = self.sender.inner.send(value.unwrap(), &nr);
+                let (result, mut value) = self.sender.inner.send_lossless(value.unwrap(), &nr);
                 // When finished, we put the value back. If the value was sent, it will be None and
                 // subsequent calls to this function will return `Ok(())`.
                 swap(&mut value, &mut self.value);
@@ -310,7 +330,7 @@ mod tests {
         assert_eq!(channel.len(), len);
         let (mut receiver, mut sender) = channel.split();
         assert_eq!(receiver.recv(), Err(nb::Error::WouldBlock));
-        assert_eq!(sender.send(4), (Ok(()), None));
+        assert_eq!(sender.send(4), Ok(()));
         assert_eq!(receiver.recv(), Ok(4));
         assert_eq!(receiver.recv(), Err(nb::Error::WouldBlock));
     }
@@ -358,8 +378,7 @@ mod tests {
             _ => assert!(false),
         }
         completion = sender.send_with_completion(NonClone::new());
-        let (s, r) = completion.done();
-        sender = s;
+        let (_, r) = completion.done();
         match r {
             Some(_) => {},
             _ => assert!(false),
@@ -376,11 +395,11 @@ mod tests {
         for _rep in 0..10 {
             for i in 0..(len - 1) {
                 println!("Sending");
-                assert_eq!(sender.send(i as u8), (Ok(()), None));
+                assert_eq!(sender.send(i as u8), Ok(()));
             }
-            assert_eq!(sender.send(255), (Err(nb::Error::WouldBlock), Some(255)));
+            assert_eq!(sender.send(255), Err(nb::Error::WouldBlock));
             assert_eq!(receiver.recv(), Ok(0));
-            assert_eq!(sender.send(255), (Ok(()), None));
+            assert_eq!(sender.send(255), Ok(()));
             for i in 1..(len - 1) {
                 assert_eq!(receiver.recv(), Ok(i as u8));
             }
