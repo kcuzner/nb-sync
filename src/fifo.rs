@@ -248,10 +248,11 @@ impl<'a, 'b: 'a, T: 'b> Sender<'a, 'b, T> {
         self.inner.send_lossless(value, &nr)
     }
 
-    /// Sends an item on the channel, returning a [`SendCompletion`].
+    /// Sends an item on the channel, returning a [`SendCompletion`]. This consumes the [`Sender`]
+    /// for the duration of the `SendCompletion`.
     ///
     /// The `SendCompletion` provides a more ergonomic `poll` method which is easily used with
-    /// `nb`'s `await!` macro when using non-clonable types.
+    /// `nb`'s `await!` macro when using a non-clonable `T`.
     pub fn send_with_completion(self, value: T) -> SendCompletion<'a, 'b, T> {
         SendCompletion::new(self, value)
     }
@@ -266,8 +267,13 @@ impl<'a, 'b: 'a, T: 'b> !Sync for Sender<'a, 'b, T> {
 
 /// Sends a value along a channel.
 ///
-/// This is created through `Sender::send_with_completion` and provides a `poll` function that can be used directly
-/// with the `nb` macro `await!`, while still allowing the owned `T` to be retrieved.
+/// This is created through [`Sender::send_with_completion`] and provides a [`poll`](SendCompletion::poll) function
+/// that can be used directly with the `nb` macro `await!`, while still allowing the owned `T` to be retrieved.
+///
+/// When the application is done using the `SendCompletion` it should call the
+/// [`done`](SendCompletion::done) method in order to retrieve the [`Sender`]. At this point, the
+/// original sent value will be returned as well if it was never sent during the lifetime of the
+/// `SendCompletion`.
 pub struct SendCompletion<'a, 'b: 'a, T: 'b> {
     sender: Sender<'a, 'b, T>,
     value: Option<T>,
